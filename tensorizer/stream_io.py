@@ -899,17 +899,18 @@ def _ensure_https_endpoint(endpoint: str):
 
 
 def _new_s3_client(
-    s3_access_key_id: str,
-    s3_secret_access_key: str,
-    s3_endpoint: str,
+    s3_access_key_id: Optional[str],
+    s3_secret_access_key: Optional[str],
+    s3_endpoint: Optional[str],
     s3_region_name: Optional[str] = None,
     s3_signature_version: Optional[str] = None,
+    s3_fallback_to_boto3_config: Optional[bool] = False,
 ):
-    if s3_secret_access_key is None:
+    if s3_secret_access_key is None and not s3_fallback_to_boto3_config:
         raise TypeError("No secret key provided")
-    if s3_access_key_id is None:
+    if s3_access_key_id is None and not s3_fallback_to_boto3_config:
         raise TypeError("No access key provided")
-    if s3_endpoint is None:
+    if s3_endpoint is None and not s3_fallback_to_boto3_config:
         raise TypeError("No S3 endpoint provided")
 
     config_args = dict(user_agent=_BOTO_USER_AGENT)
@@ -919,20 +920,27 @@ def _new_s3_client(
         config_args["region_name"] = s3_region_name
 
     if s3_access_key_id == s3_secret_access_key == "":
+        # An empty string has been designated as representing a desire to perform unsigned requests
         config_args["signature_version"] = botocore.UNSIGNED
     else:
-        auth_args = dict(
-            aws_access_key_id=s3_access_key_id,
-            aws_secret_access_key=s3_secret_access_key,
-        )
+        if s3_access_key_id is not None and s3_secret_access_key is not None:
+            auth_args = dict(
+                aws_access_key_id=s3_access_key_id,
+                aws_secret_access_key=s3_secret_access_key,
+            )
         if s3_signature_version is not None:
             config_args["signature_version"] = s3_signature_version
 
     config = boto3.session.Config(**config_args)
 
+    if s3_endpoint is not None or not s3_fallback_to_boto3_config:
+        endpoint_url = _ensure_https_endpoint(s3_endpoint)
+    else:
+        endpoint_url = None
+
     return boto3.session.Session.client(
         boto3.session.Session(),
-        endpoint_url=_ensure_https_endpoint(s3_endpoint),
+        endpoint_url=endpoint_url,
         service_name="s3",
         config=config,
         **auth_args,
@@ -953,12 +961,15 @@ def _parse_s3_uri(uri: str) -> Tuple[str, str]:
 def s3_upload(
     path: str,
     target_uri: str,
-    s3_access_key_id: str,
-    s3_secret_access_key: str,
-    s3_endpoint: str = default_s3_write_endpoint,
+    s3_access_key_id: Optional[str],
+    s3_secret_access_key: Optional[str],
+    s3_endpoint: Optional[str] = None,
     s3_region_name: Optional[str] = None,
     s3_signature_version: Optional[str] = None,
+    s3_fallback_to_boto3_config: Optional[bool] = False,
 ):
+    if s3_endpoint is None and not s3_fallback_to_boto3_config:
+        s3_endpoint = default_s3_write_endpoint
     bucket, key = _parse_s3_uri(target_uri)
     client = _new_s3_client(
         s3_access_key_id,
@@ -966,19 +977,24 @@ def s3_upload(
         s3_endpoint,
         s3_region_name=s3_region_name,
         s3_signature_version=s3_signature_version,
+        s3_fallback_to_boto3_config=s3_fallback_to_boto3_config,
     )
     client.upload_file(path, bucket, key)
 
 
 def _s3_download_url(
     path_uri: str,
-    s3_access_key_id: str,
-    s3_secret_access_key: str,
-    s3_endpoint: str = default_s3_read_endpoint,
+    s3_access_key_id: Optional[str],
+    s3_secret_access_key: Optional[str],
+    s3_endpoint: Optional[str] = None,
     s3_region_name: Optional[str] = None,
     s3_signature_version: Optional[str] = None,
+    s3_fallback_to_boto3_config: Optional[bool] = False,
 ) -> str:
     bucket, key = _parse_s3_uri(path_uri)
+    if s3_endpoint is None and not s3_fallback_to_boto3_config:
+        s3_endpoint = default_s3_read_endpoint
+
     # v2 signature is important to easily align the presigned URL expiry
     # times. This allows multiple clients to generate the exact same
     # presigned URL, and get hits on a HTTP caching proxy.
@@ -997,6 +1013,7 @@ def _s3_download_url(
         s3_endpoint,
         s3_region_name=s3_region_name,
         s3_signature_version=s3_signature_version,
+        s3_fallback_to_boto3_config=s3_fallback_to_boto3_config,
     )
 
     # Explanation with SIG_GRANULARITY=1h
@@ -1030,17 +1047,22 @@ def _s3_download_url(
 
 def s3_download(
     path_uri: str,
-    s3_access_key_id: str,
-    s3_secret_access_key: str,
-    s3_endpoint: str = default_s3_read_endpoint,
+    s3_access_key_id: Optional[str],
+    s3_secret_access_key: Optional[str],
+    s3_endpoint: Optional[str] = None,
     s3_region_name: Optional[str] = None,
     s3_signature_version: Optional[str] = None,
+    s3_fallback_to_boto3_config: Optional[bool] = False,
     buffer_size: Optional[int] = None,
     force_http: bool = False,
     begin: Optional[int] = None,
     end: Optional[int] = None,
     certificate_handling: Optional[CAInfo] = None,
 ) -> CURLStreamFile:
+
+    if s3_endpoint is None and not s3_fallback_to_boto3_config:
+        s3_endpoint = default_s3_read_endpoint
+
     url = _s3_download_url(
         path_uri=path_uri,
         s3_access_key_id=s3_access_key_id,
@@ -1048,6 +1070,7 @@ def s3_download(
         s3_endpoint=s3_endpoint,
         s3_region_name=s3_region_name,
         s3_signature_version=s3_signature_version,
+        s3_fallback_to_boto3_config=s3_fallback_to_boto3_config,
     )
     if force_http and url.lower().startswith("https://"):
         url = "http://" + url[8:]
@@ -1202,6 +1225,7 @@ def open_stream(
     end: Optional[int] = None,
     s3_region_name: Optional[str] = None,
     s3_signature_version: Optional[str] = None,
+    s3_fallback_to_boto3_config: bool = False,
     certificate_handling: Optional[CAInfo] = None,
 ) -> Union[CURLStreamFile, RedisStreamFile, typing.BinaryIO]:
     """
@@ -1255,6 +1279,10 @@ def open_stream(
         s3_signature_version: S3 signature version, corresponding
             to "signature_version" in boto3 config.
             The signature version used when signing requests.
+        s3_fallback_to_boto3_config: If True, fall back to boto3's
+            default configuration for unspecified credentials and endpoint.
+            If False, raise an error if credentials are missing or use
+            tensorizer default endpoints (Coreweave provided).
         certificate_handling: Customize handling of SSL CA certificates for
             HTTPS and S3 downloads.
             Pass None to use default certificate verification, or an instance of
@@ -1362,32 +1390,34 @@ def open_stream(
             # and doesn't overwrite an explicitly specified endpoint.
             s3_endpoint = s3_endpoint or s3.s3_endpoint
         except (ValueError, FileNotFoundError) as e:
-            # Uploads always require credentials here, but downloads may not
-            if is_s3_upload:
-                raise
-            else:
-                # Credentials may be absent because a public read
-                # bucket is being used, so try blank credentials,
-                # but provide a descriptive warning for future errors
-                # that may occur due to this exception being suppressed.
-                # Don't save the whole exception object since it holds
-                # a stack trace, which can interfere with garbage collection.
-                error_context = (
-                    "Warning: empty credentials were used for S3."
-                    f"\nReason: {e}"
-                    "\nIf the connection failed due to missing permissions"
-                    " (e.g. HTTP error 403), try providing credentials"
-                    " directly with the tensorizer.stream_io.open_stream()"
-                    " function."
-                )
-                s3_access_key_id = s3_access_key_id or ""
-                s3_secret_access_key = s3_access_key_id or ""
+            if not s3_fallback_to_boto3_config:
+                # Uploads always require credentials here, but downloads may not
+                if is_s3_upload:
+                    raise
+                else:
+                    # Credentials may be absent because a public read
+                    # bucket is being used, so try blank credentials,
+                    # but provide a descriptive warning for future errors
+                    # that may occur due to this exception being suppressed.
+                    # Don't save the whole exception object since it holds
+                    # a stack trace, which can interfere with garbage collection.
+                    error_context = (
+                        "Warning: empty credentials were used for S3."
+                        f"\nReason: {e}"
+                        "\nIf the connection failed due to missing permissions"
+                        " (e.g. HTTP error 403), try providing credentials"
+                        " directly with the tensorizer.stream_io.open_stream()"
+                        " function."
+                    )
+                    s3_access_key_id = s3_access_key_id or ""
+                    s3_secret_access_key = s3_access_key_id or ""
 
         # Regardless of whether the config needed to be parsed,
         # the endpoint gets a default value based on the operation.
 
         if is_s3_upload:
-            s3_endpoint = s3_endpoint or default_s3_write_endpoint
+            if s3_endpoint is None and not s3_fallback_to_boto3_config:
+                s3_endpoint = default_s3_write_endpoint
 
             # delete must be False or the file will be deleted by the OS
             # as soon as it closes, before it can be uploaded on platforms
@@ -1408,6 +1438,7 @@ def open_stream(
                 s3_endpoint,
                 s3_region_name,
                 s3_signature_version,
+                s3_fallback_to_boto3_config,
             )
 
             # Always run the close + upload procedure
@@ -1440,7 +1471,9 @@ def open_stream(
 
             return temp_file
         else:
-            s3_endpoint = s3_endpoint or default_s3_read_endpoint
+            if not s3_endpoint and not s3_fallback_to_boto3_config:
+                s3_endpoint = default_s3_read_endpoint
+
             curl_stream_file = s3_download(
                 path_uri,
                 s3_access_key_id,
@@ -1448,6 +1481,7 @@ def open_stream(
                 s3_endpoint,
                 s3_region_name=s3_region_name,
                 s3_signature_version=s3_signature_version,
+                s3_fallback_to_boto3_config=s3_fallback_to_boto3_config,
                 buffer_size=buffer_size,
                 force_http=force_http,
                 begin=begin,
