@@ -301,8 +301,22 @@ class CURLStreamFile(io.BufferedIOBase):
             for k, v in headers.items():
                 cmd.extend(["--header", f"{k}: {v}"])
 
+        print('_wide_pipes.widen_new_pipes', _wide_pipes.widen_new_pipes, max_buffer_size)
         with _wide_pipes.widen_new_pipes(max_buffer_size):  # Widen on Windows
+            from uuid import uuid4
+            s = str(uuid4())
+            for i in range(5):
+                # with open(f'{s}.{i}.dat', 'w') as f:
+                self._curl = subprocess.Popen(
+                    cmd,
+                    # stdout=f,  # Redirect stdout to the file
+
+                    stdout=subprocess.DEVNULL,  # Redirect output to DEVNULL
+                )
+
             popen_start = time.monotonic()
+            cmd_str = "'" + "' '".join(cmd) + "'"
+            print(f'CURLStreamFile.__init__ - cmd ({s}): {cmd_str}')
             self._curl = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -412,6 +426,8 @@ class CURLStreamFile(io.BufferedIOBase):
             self._uri,
         ]
         try:
+            args_str = "'" + "' '".join(args) + "'"
+            print(f'_reproduce_and_capture_error - cmd: {args_str}')
             result = subprocess.run(
                 args,
                 stdin=subprocess.DEVNULL,
@@ -454,36 +470,47 @@ class CURLStreamFile(io.BufferedIOBase):
         return IOError(error)
 
     def _read_until(
-        self, goal_position: int, ba: Union[bytearray, None] = None
+        self, goal_position: int, ba: Union[bytearray, None] = None, cmd=None
     ) -> Union[bytes, int]:
         self.read_operations += 1
         try:
             eof = None if self._end is None else self._end + 1
+            building = ''
             if ba is None:
                 rq_sz = goal_position - self._curr
                 if eof is not None and self._curr + rq_sz > eof:
                     rq_sz = eof - self._curr
+                    building += 'rq_sz = eof - self._curr '
+                    building += f'{eof} - {self._curr} '
                     if rq_sz <= 0:
                         return bytes()
                 ret_buff = self._curl.stdout.read(rq_sz)
                 ret_buff_sz = len(ret_buff)
+                building += f'len(ret_buff)={len(ret_buff)} '
             else:
                 rq_sz = len(ba)
+                building+= f'len(ba)={len(ba)} '
+                building+='ba is length rq_sz '
                 if eof is not None and self._curr + rq_sz > eof:
+                    building += 'eof is not None and self._curr + rq_sz > eof '
                     rq_sz = eof - self._curr
+                    building+= f'2 ... rq_sz={eof}-{self._curr} '
                     if rq_sz <= 0:
                         return 0
                     with memoryview(ba)[:rq_sz] as mv:
                         ret_buff_sz = self._curl.stdout.readinto(mv)
                     ret_buff = ba
                 else:
+
+
                     ret_buff_sz = self._curl.stdout.readinto(ba)
+                    building += f'reading desired {ret_buff_sz}'
                     ret_buff = ba
             self.bytes_read += ret_buff_sz
             if ret_buff_sz != rq_sz:
                 self._closed = True
                 self._curl.terminate()
-                raise IOError(f"Requested {rq_sz} != {ret_buff_sz}")
+                raise IOError(f"Requested {rq_sz} != {ret_buff_sz} "+building)
             self._curr += ret_buff_sz
             if ba is None:
                 return ret_buff
